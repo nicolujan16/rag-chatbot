@@ -6,6 +6,7 @@ import ChatMessage from "@/components/ChatMessage";
 import Composer from "@/components/Composer";
 import EmptyState from "@/components/EmptyState";
 import Sidebar from "@/components/Sidebar";
+import Suggestions from "@/components/Suggestions";
 import UploadList from "@/components/UploadList";
 import {
   ACCEPT_ATTRIBUTE,
@@ -175,6 +176,9 @@ export default function ChatApp({ user, onSignOut }: ChatAppProps) {
         content: result.answer,
         sources: result.sources,
         pending: false,
+        // Solo esta respuesta se escribe sola. Las que vengan del historial se
+        // pintan enteras, porque `animate` no se guarda en la base.
+        animate: true,
       });
 
       if (result.usage) {
@@ -272,6 +276,15 @@ export default function ChatApp({ user, onSignOut }: ChatAppProps) {
           setUploads((prev) => prev.filter((upload) => upload.id !== id))
         }
       />
+      {/* Con el chat vacío las sugerencias ya están en EmptyState, en grande.
+          Acá van solo cuando la conversación empezó, para tenerlas a mano sin
+          tapar lo que se está leyendo. */}
+      {usage?.is_demo && messages.length > 0 && (
+        <Suggestions
+          onAsk={(question) => void send(question)}
+          disabled={busy || outOfQuestions}
+        />
+      )}
       <Composer
         onSend={send}
         onAttach={openFilePicker}

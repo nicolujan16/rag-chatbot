@@ -4,9 +4,16 @@ import { Check, Copy, FileText, Loader2 } from "lucide-react";
 import { useState } from "react";
 import Markdown from "@/components/Markdown";
 import type { Message } from "@/lib/types";
+import { useTypewriter } from "@/lib/use-typewriter";
 
 export default function ChatMessage({ message }: { message: Message }) {
   const [copied, setCopied] = useState(false);
+
+  // Los hooks van antes del return temprano del mensaje del usuario.
+  const { revealed, typing } = useTypewriter(
+    message.content,
+    message.animate === true && !message.failed,
+  );
 
   if (message.role === "user") {
     return (
@@ -46,10 +53,14 @@ export default function ChatMessage({ message }: { message: Message }) {
             {message.content}
           </div>
         ) : (
-          <Markdown content={message.content} />
+          // El cursor va dentro del Markdown como un carácter más: cualquier
+          // otra forma de ubicarlo pelea con el reflow de cada repintado.
+          <Markdown content={typing ? `${revealed}▍` : message.content} />
         )}
 
-        {message.sources && message.sources.length > 0 && (
+        {/* Las fuentes esperan a que termine de escribirse: aparecer a mitad
+            del texto las deja bailando mientras crece el párrafo. */}
+        {!typing && message.sources && message.sources.length > 0 && (
           <div className="mt-4">
             <p className="mb-2 text-xs font-medium text-muted">
               Fuentes ({message.sources.length})
@@ -72,7 +83,7 @@ export default function ChatMessage({ message }: { message: Message }) {
           </div>
         )}
 
-        {!message.pending && !message.failed && (
+        {!message.pending && !message.failed && !typing && (
           <div className="mt-2 flex items-center gap-1 text-muted">
             <button
               type="button"

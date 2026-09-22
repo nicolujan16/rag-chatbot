@@ -1,6 +1,15 @@
 "use client";
 
-import { FileText, LogOut, PanelLeft, Search, SquarePen, Trash2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  LogOut,
+  PanelLeft,
+  Search,
+  SquarePen,
+  Trash2,
+} from "lucide-react";
 import { useMemo, useState } from "react";
 import { formatBytes } from "@/lib/insforge";
 import type { AuthUser, Conversation, StoredFile, Usage } from "@/lib/types";
@@ -48,6 +57,7 @@ export default function Sidebar({
   onSignOut,
 }: SidebarProps) {
   const [query, setQuery] = useState("");
+  const [filesOpen, setFilesOpen] = useState(true);
 
   const grouped = useMemo(() => {
     const term = query.trim().toLowerCase();
@@ -172,11 +182,23 @@ export default function Sidebar({
         </div>
 
         {files.length > 0 && (
-          <div className="max-h-56 overflow-y-auto border-t border-border px-3 py-3">
-            <h2 className="px-2 pb-1 text-xs font-medium text-muted">
-              Documentos ({files.length})
+          <div className="border-t border-border px-3 py-3">
+            <h2>
+              <button
+                type="button"
+                onClick={() => setFilesOpen((open) => !open)}
+                aria-expanded={filesOpen}
+                className="flex w-full items-center justify-between rounded-lg px-2 py-1 text-xs font-medium text-muted transition-colors hover:bg-hover hover:text-text"
+              >
+                <span>Documentos ({files.length})</span>
+                {filesOpen ? (
+                  <ChevronDown className="size-4" aria-label="Ocultar documentos" />
+                ) : (
+                  <ChevronUp className="size-4" aria-label="Mostrar documentos" />
+                )}
+              </button>
             </h2>
-            <ul>
+            <ul className={filesOpen ? "max-h-48 overflow-y-auto" : "hidden"}>
               {files.map((file) => (
                 <li
                   key={file.id}

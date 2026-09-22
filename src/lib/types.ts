@@ -18,6 +18,11 @@ export interface Message {
   /** Solo en cliente: el asistente todavía está esperando la respuesta. */
   pending?: boolean;
   failed?: boolean;
+  /**
+   * Solo en cliente: la respuesta acaba de llegar, se revela letra por letra.
+   * Los mensajes que se leen del historial no lo llevan.
+   */
+  animate?: boolean;
 }
 
 export interface Conversation {

@@ -1,6 +1,7 @@
 "use client";
 
 import { Upload } from "lucide-react";
+import { DEMO_QUESTIONS } from "@/lib/demo-questions";
 
 interface EmptyStateProps {
   onAttach: () => void;
@@ -8,18 +9,6 @@ interface EmptyStateProps {
   hasSources: boolean;
   isDemo: boolean;
 }
-
-/**
- * Preguntas que el corpus de la demo sí puede contestar. Sirven de arranque
- * para quien entra sin saber qué preguntarle, y de paso muestran las dos cosas
- * que tiene cargadas: la técnica y el autor.
- */
-const DEMO_QUESTIONS = [
-  "¿Qué es un RAG y cuáles son sus dos etapas?",
-  "¿Quién es Nicolás Luján y qué tecnologías maneja?",
-  "¿Cómo hace este proyecto para aislar los documentos de cada usuario?",
-  "¿Qué limitaciones conocidas tiene este chatbot?",
-];
 
 export default function EmptyState({
   onAttach,
@@ -43,14 +32,14 @@ export default function EmptyState({
 
       {isDemo && (
         <div className="mx-auto mb-6 flex max-w-xl flex-wrap justify-center gap-2">
-          {DEMO_QUESTIONS.map((question) => (
+          {DEMO_QUESTIONS.map((item) => (
             <button
-              key={question}
+              key={item.question}
               type="button"
-              onClick={() => onAsk(question)}
+              onClick={() => onAsk(item.question)}
               className="rounded-full border border-border px-3 py-1.5 text-xs text-muted transition-colors hover:bg-hover hover:text-text"
             >
-              {question}
+              {item.question}
             </button>
           ))}
         </div>
