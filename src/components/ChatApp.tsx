@@ -328,7 +328,12 @@ export default function ChatApp({ user, onSignOut }: ChatAppProps) {
         {messages.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center px-4">
             <div className="w-full max-w-3xl">
-              <EmptyState onAttach={openFilePicker} hasSources={files.length > 0} />
+              <EmptyState
+                onAttach={openFilePicker}
+                onAsk={(question) => void send(question)}
+                hasSources={files.length > 0}
+                isDemo={usage?.is_demo ?? false}
+              />
               {composer}
             </div>
           </div>

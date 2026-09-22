@@ -4,6 +4,9 @@
 
 Chat que responde **solo** con lo que dicen tus documentos, y que admite no saber.
 
+**En vivo: [39237v7a.insforge.site](https://39237v7a.insforge.site)** — no hace falta
+registrarse, tocá **Probar demo**.
+
 Subís archivos de texto, se parten en fragmentos y se indexan como vectores. Cuando
 preguntás, se recuperan los fragmentos más parecidos y se le pasan a un LLM con una
 instrucción estricta: responder únicamente con ese contexto y, si la respuesta no está
@@ -11,6 +14,9 @@ ahí, decir `no tengo esa información en mis documentos` en vez de inventar.
 
 Cada usuario ve solo sus documentos y sus chats, con aislamiento aplicado en la base de
 datos y no en el código de la aplicación.
+
+El registro público está cerrado. La única forma de entrar sin credenciales es el botón de
+demo, que entrega una cuenta descartable que se borra sola — ver [Modo demo](#modo-demo).
 
 ---
 
@@ -22,6 +28,7 @@ datos y no en el código de la aplicación.
 | Backend | InsForge — Postgres, auth, edge functions en Deno |
 | Vectores | pgvector con índice HNSW y distancia coseno |
 | Modelos | OpenRouter — `text-embedding-3-small` (1536 dims) y `gpt-4o-mini` |
+| Hosting | Deployments de InsForge (Vercel por debajo) |
 
 ## Arquitectura
 
@@ -32,9 +39,12 @@ Navegador (Next.js)
   │     auth, chats, archivos        RLS filtra por auth.uid()
   │
   └── functions.invoke ───────────► Edge functions (Deno)
-        ingest / ask                  │
+        ingest / ask / demo           │
                                       ├──► OpenRouter  (embeddings + chat)
                                       └──► Postgres    (pgvector + cuotas)
+
+Solo administración (CLI / schedule)
+  └── demo-seed, demo-cleanup ────► Postgres + API admin de auth
 ```
 
 **`ingest`** valida el token, reserva la cuota de almacenamiento, parte el texto en
@@ -46,6 +56,15 @@ recupera los 5 fragmentos más cercanos con `match_documents`, y se los pasa al 
 con la instrucción de no salirse de ese contexto. Devuelve la respuesta y sus fuentes con
 el score de similitud de cada una.
 
+**`demo`** crea una cuenta descartable y le copia el corpus de demostración. Es pública, y
+la única puerta de entrada a una cuenta ahora que el registro está cerrado.
+
+**`demo-seed`** carga un documento en el corpus plantilla. Solo con la API key de
+administración, desde la línea de comandos.
+
+**`demo-cleanup`** borra las cuentas demo vencidas. Solo con la API key de administración,
+lo dispara un schedule diario.
+
 ## Modelo de datos
 
 | Tabla | Para qué | Quién escribe |
@@ -54,6 +73,8 @@ el score de similitud de cada una.
 | `ingested_files` | Un archivo por fila, con sus bytes: es el contador de la cuota | Functions; el usuario puede borrar |
 | `conversations` / `messages` | Historial del chat | El navegador con el token del usuario |
 | `question_log` | Append-only, cuenta el cupo diario | Solo las functions |
+| `demo_files` / `demo_documents` | El corpus plantilla de la demo, sin dueño | Solo `demo-seed` |
+| `demo_sessions` | Marca qué cuentas son demo y cuándo nacieron | Solo `demo` |
 
 Borrar una fila de `ingested_files` arrastra sus fragmentos por la clave foránea y libera
 la cuota, así que el usuario puede administrar su espacio sin intervención.
@@ -88,6 +109,23 @@ Sin políticas, `anon` y `authenticated` no pueden tocarla: solo la escriben las
 con el cliente admin. Si el usuario pudiera borrar sus filas, reiniciaría su propio
 límite diario.
 
+**El visitante de la demo recibe una cuenta real, no un modo especial.**
+La alternativa —una cuenta compartida, o una excepción en el código— significaría que
+todos los visitantes comparten un mismo historial y un mismo cupo. Como la cuenta demo es
+una fila de usuario común, pasa exactamente por las mismas políticas RLS que cualquier
+otra: el aislamiento entre visitantes es el que la aplicación ya tenía, y no un segundo
+mecanismo que podría discrepar del primero.
+
+**El corpus de la demo se embebe una vez y se copia, no se vuelve a embeber.**
+`demo_files` / `demo_documents` guardan los vectores sin dueño. Aprovisionar a un
+visitante es una copia en SQL: los mismos vectores, sin llamar a OpenRouter. Embeber por
+visitante costaría dinero para producir resultados idénticos a los ya guardados.
+
+**La demo tiene un tope diario global, no solo uno por cuenta.**
+Un cupo por cuenta no acota nada cuando cualquiera puede pedir una cuenta nueva. El tope
+que realmente limita el gasto es `limit_demo_questions_per_day_global()`; el de cada
+cuenta solo evita que un visitante se coma todo el presupuesto.
+
 **El solapamiento arrastra oraciones completas, no caracteres.**
 La primera versión cortaba por cantidad de caracteres y dejaba fragmentos que empezaban a
 mitad de palabra (`"o anual de capacitación..."`). Además de verse mal, ensucia el
@@ -101,15 +139,23 @@ Habilitar HTML crudo sería ejecutar HTML de terceros en la sesión.
 
 ## Límites por usuario
 
+| Límite | Cuenta normal | Cuenta demo | Dónde vive |
+|---|---|---|---|
+| Preguntas por día | 5 | 50 | `limit_questions_per_day()` / `limit_demo_questions_per_day()` |
+| Almacenamiento total | 2 MiB de texto | 2 MiB de texto | `limit_storage_bytes()` |
+| Tamaño por archivo | 1 MiB | 1 MiB | `limit_file_bytes()` |
+
+Y tres que acotan la demo como conjunto:
+
 | Límite | Valor | Dónde vive |
 |---|---|---|
-| Preguntas por día | 5 | `limit_questions_per_day()` |
-| Almacenamiento total | 2 MiB de texto | `limit_storage_bytes()` |
-| Tamaño por archivo | 1 MiB | `limit_file_bytes()` |
+| Preguntas diarias de toda la demo | 300 | `limit_demo_questions_per_day_global()` |
+| Cuentas demo nuevas por hora | 20 | `limit_demo_sessions_per_hour()` |
+| Vida de una cuenta demo | 24 h | `limit_demo_lifetime_hours()` |
 
-Los tres viven **solo en SQL**. La UI los lee con `my_usage()` y las functions los aplican
-a través de `reserve_file` y `consume_question`, así que no pueden desincronizarse: para
-cambiarlos se toca una función y nada más.
+Todos viven **solo en SQL**. La UI los lee con `my_usage()` y las functions los aplican a
+través de `reserve_file`, `consume_question` y `provision_demo_user`, así que no pueden
+desincronizarse: para cambiarlos se toca una función y nada más.
 
 El de 2 MiB no es arbitrario. Cada fragmento de ~500 tokens ocupa unos 6 KB solo en el
 vector (1536 floats × 4 bytes), así que 2 MiB de texto son ~1050 fragmentos ≈ 6,3 MB de
@@ -117,6 +163,52 @@ vectores por usuario. En el plan gratuito de InsForge eso deja lugar para varias
 de usuarios. En texto plano, 2 MiB son unas 600 páginas.
 
 El día se corta a **medianoche UTC**, no en el huso local.
+
+---
+
+## Modo demo
+
+Tocar **Probar demo** llama a la function `demo`, que:
+
+1. crea un usuario por la API de administración de auth, con una dirección aleatoria bajo
+   `@demo.invalid` y una contraseña aleatoria;
+2. llama a `provision_demo_user()`, que copia el corpus plantilla a las filas propias de
+   ese usuario en `ingested_files` / `documents` y registra la cuenta en `demo_sessions`;
+3. devuelve las credenciales de un solo uso, que el navegador usa enseguida para iniciar
+   sesión por el camino normal de contraseña.
+
+De ahí en adelante es una sesión común: el visitante puede preguntar, subir sus propios
+archivos y borrar cosas, todo dentro de su cuenta y sin tocar la de nadie más.
+
+Si el aprovisionamiento falla, la function borra el usuario que acababa de crear, así que
+un intento rechazado no deja una cuenta colgada.
+
+`demo-cleanup` corre todos los días a las 04:00 UTC y borra las cuentas más viejas que
+`limit_demo_lifetime_hours()`. Borrar al usuario arrastra sus archivos, fragmentos, chats
+y cupo consumido. Para purgar todas las cuentas demo ahora mismo, se le pasa una ventana
+de cero:
+
+```bash
+npx -y @insforge/cli functions invoke demo-cleanup --data '{"older_than_hours":0}'
+```
+
+### El corpus de la demo
+
+Los seis documentos viven en [`demo-corpus/`](demo-corpus/) y cubren qué es un RAG, cómo
+está hecho este proyecto y quién lo hizo, en español e inglés. Son la fuente de verdad
+legible; los vectores de la base se derivan de ellos.
+
+Para cargar o recargar uno (es el único paso que gasta embeddings):
+
+```bash
+npx -y @insforge/cli functions invoke demo-seed \
+  --data "$(node scripts/demo-seed-payload.mjs demo-corpus/que-es-un-rag.md)"
+```
+
+Volver a sembrar el mismo nombre reemplaza la versión anterior. En Windows la línea de
+comandos tiene un tope de ~32 KB, y por eso el corpus está partido en archivos enfocados
+en vez de dos largos — una división que además recupera mejor, por el motivo de
+[la medición pendiente](#una-medición-pendiente).
 
 ---
 
@@ -132,15 +224,52 @@ npx -y @insforge/cli login
 npx -y @insforge/cli link --project-id <tu-project-id>
 npx -y @insforge/cli db migrations up --all
 
+# La configuración de auth vive en insforge.toml y se aplica como código
+npx -y @insforge/cli config apply
+
 # La clave de OpenRouter va como secret del backend, nunca en el repo.
 # Los secrets se inyectan al desplegar: si la rotás, hay que volver a
-# desplegar ambas functions para que la tomen.
+# desplegar las functions para que la tomen.
 npx -y @insforge/cli secrets add OPENROUTER_API_KEY sk-or-v1-...
 npx -y @insforge/cli functions deploy ingest --file ./functions/ingest.ts
 npx -y @insforge/cli functions deploy ask --file ./functions/ask.ts
+npx -y @insforge/cli functions deploy demo --file ./functions/demo.ts
+npx -y @insforge/cli functions deploy demo-seed --file ./functions/demo-seed.ts
+npx -y @insforge/cli functions deploy demo-cleanup --file ./functions/demo-cleanup.ts
 ```
 
-`.env.local` con los valores de tu proyecto:
+Después se siembra el corpus una vez (ver [El corpus de la demo](#el-corpus-de-la-demo)) y
+se agenda la limpieza:
+
+```bash
+npx -y @insforge/cli schedules create \
+  --name "Demo cleanup" \
+  --cron "0 4 * * *" \
+  --url "https://<tu-proyecto>.insforge.app/functions/demo-cleanup" \
+  --method POST \
+  --headers '{"Authorization":"Bearer ${{secrets.API_KEY}}","Content-Type":"application/json"}' \
+  --body '{}'
+```
+
+### Configuración de auth
+
+[`insforge.toml`](insforge.toml) guarda la configuración de auth, y dos valores son
+estructurales:
+
+- `disable_signup = true` cierra el registro público. Lo rechaza el backend; la UI no está
+  simplemente escondiendo un formulario.
+- `require_email_verification = false` es lo que permite que una cuenta demo inicie sesión.
+  Las cuentas las crea la API de administración con una dirección `@demo.invalid` donde
+  nadie puede leer el correo, así que con la verificación activa se crean y quedan
+  bloqueadas.
+
+Los dos van juntos. Desactivar la verificación con el registro abierto permitiría que
+cualquiera se registre sin verificar, así que si algún día volvés a abrir `disable_signup`,
+reactivá la verificación en el mismo cambio.
+
+### Variables de entorno
+
+`.env.local` para desarrollo local:
 
 ```bash
 NEXT_PUBLIC_INSFORGE_URL=https://<tu-proyecto>.insforge.app
@@ -150,13 +279,23 @@ NEXT_PUBLIC_INSFORGE_ANON_KEY=anon_...
 Ambas son públicas por diseño: la clave anónima solo habilita lo que permitan las
 políticas RLS. La clave de administrador nunca sale del backend.
 
+El build desplegado no lee `.env.local` —la subida excluye `.env*`— así que los mismos dos
+valores se guardan como variables de entorno del deployment:
+
+```bash
+npx -y @insforge/cli deployments env set NEXT_PUBLIC_INSFORGE_URL https://<tu-proyecto>.insforge.app
+npx -y @insforge/cli deployments env set NEXT_PUBLIC_INSFORGE_ANON_KEY anon_...
+npx -y @insforge/cli deployments deploy .
+```
+
 ```bash
 npm run dev
 ```
 
 ### Los endpoints por HTTP
 
-Las dos functions exigen un `Bearer` válido; sin él devuelven 401.
+`ingest` y `ask` exigen un `Bearer` válido; sin él devuelven 401. `demo` toma la clave
+anónima, como cualquier function pública.
 
 ```bash
 curl -X POST "https://<tu-proyecto>.insforge.app/functions/ingest" \
@@ -181,10 +320,17 @@ Lo que todavía no hace, dicho de frente:
   anteriores se guardan y se muestran, pero no entran al prompt. Un "¿y cuánto sale el
   Pro?" después de una tabla no funciona.
 - **Sin streaming.** La respuesta aparece completa al terminar.
-- **Sin tope global de gasto.** El alta es abierta y cada usuario nuevo son 5 preguntas
-  diarias contra la clave de OpenRouter del dueño del proyecto.
 - **Recuperación sin umbral.** `match_documents` devuelve siempre los 5 más cercanos, aun
   si son irrelevantes; quien filtra es el prompt del modelo.
+- **El gasto está acotado para la demo, no para el proyecto.** El tope global diario de la
+  demo acota lo que pueden gastar los visitantes anónimos, pero una cuenta con nombre sigue
+  teniendo sus 5 preguntas diarias por encima de eso, y nada vigila el saldo de OpenRouter
+  en sí.
+- **El corpus de la demo se duplica por visitante.** 16 fragmentos ≈ 100 KB de vectores por
+  cuenta demo. Alcanza a esta escala; un corpus compartido de solo lectura escalaría mejor.
+- **`demo-seed` repite el código de troceado de `ingest`.** Las edge functions se despliegan
+  como archivos sueltos, sin módulo compartido, así que las dos copias hay que mantenerlas
+  sincronizadas a mano.
 - **Sin tests automatizados.**
 
 ### Una medición pendiente

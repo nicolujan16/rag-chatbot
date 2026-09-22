@@ -69,6 +69,7 @@ export default function Sidebar({
   const questionsLeft = usage
     ? Math.max(0, usage.questions_limit - usage.questions_used)
     : 0;
+  const isDemo = usage?.is_demo ?? false;
 
   return (
     <>
@@ -231,16 +232,23 @@ export default function Sidebar({
         <div className="border-t border-border p-3">
           <div className="flex items-center gap-3 rounded-lg px-2 py-2">
             <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-semibold uppercase text-accent-fg">
-              {(user.name ?? user.email).slice(0, 1)}
+              {isDemo ? "D" : (user.name ?? user.email).slice(0, 1)}
             </span>
             <span className="min-w-0 flex-1">
+              {/* En demo, el email es un uuid descartable: no aporta nada. */}
               <span className="block truncate text-sm" title={user.email}>
-                {user.name ?? user.email}
+                {isDemo ? "Cuenta de demostración" : (user.name ?? user.email)}
               </span>
-              {user.name && (
+              {isDemo ? (
                 <span className="block truncate text-xs text-muted">
-                  {user.email}
+                  Temporal, se borra sola
                 </span>
+              ) : (
+                user.name && (
+                  <span className="block truncate text-xs text-muted">
+                    {user.email}
+                  </span>
+                )
               )}
             </span>
             <button

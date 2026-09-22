@@ -70,6 +70,32 @@ export function ask(question: string): Promise<AskResult> {
   return callFunction<AskResult>("ask", { question });
 }
 
+interface DemoAccount {
+  email: string;
+  password: string;
+  files: number;
+  chunks: number;
+}
+
+/**
+ * Pide una cuenta de demostración e inicia sesión con ella.
+ *
+ * La function crea un usuario real y le copia el corpus de ejemplo, así que a
+ * partir de acá la sesión es igual a cualquier otra: las mismas políticas RLS,
+ * sus propios documentos y su propio historial. Las credenciales son de un solo
+ * uso y no se guardan en ningún lado.
+ */
+export async function startDemo(): Promise<void> {
+  const account = await callFunction<DemoAccount>("demo", {});
+
+  const { error } = await insforge.auth.signInWithPassword({
+    email: account.email,
+    password: account.password,
+  });
+
+  if (error) throw new Error(error.message);
+}
+
 // ------------------------------------------------------------------ datos ---
 
 function unwrap<T>(result: { data: T | null; error: unknown }): T {

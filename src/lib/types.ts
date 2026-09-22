@@ -41,6 +41,8 @@ export interface Usage {
   bytes_used: number;
   bytes_limit: number;
   file_bytes_limit: number;
+  /** La cuenta es una demo descartable: cupo más alto y vida corta. */
+  is_demo: boolean;
 }
 
 export interface AuthUser {
