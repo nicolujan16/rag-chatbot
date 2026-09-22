@@ -1,26 +1,91 @@
 @import "tailwindcss";
 
+/* Tema claro por defecto */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #ffffff;
+  --surface: #f9f9f9;
+  --elevated: #ffffff;
+  --bubble: #f4f4f4;
+  --border: #e5e5e5;
+  --text: #0d0d0d;
+  --muted: #8f8f8f;
+  --hover: rgba(0, 0, 0, 0.05);
+  --accent: #0d0d0d;
+  --accent-fg: #ffffff;
+}
+
+/* Tema oscuro por preferencia del sistema, salvo override explícito a claro */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #212121;
+    --surface: #181818;
+    --elevated: #2f2f2f;
+    --bubble: #303030;
+    --border: #3a3a3a;
+    --text: #ececec;
+    --muted: #9b9b9b;
+    --hover: rgba(255, 255, 255, 0.07);
+    --accent: #ffffff;
+    --accent-fg: #0d0d0d;
+  }
+}
+
+/* Override explícito a oscuro */
+:root[data-theme="dark"] {
+  --bg: #212121;
+  --surface: #181818;
+  --elevated: #2f2f2f;
+  --bubble: #303030;
+  --border: #3a3a3a;
+  --text: #ececec;
+  --muted: #9b9b9b;
+  --hover: rgba(255, 255, 255, 0.07);
+  --accent: #ffffff;
+  --accent-fg: #0d0d0d;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-elevated: var(--elevated);
+  --color-bubble: var(--bubble);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-hover: var(--hover);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  height: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+/* Scrollbar discreta al estilo del chat */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  border-radius: 9999px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
 }

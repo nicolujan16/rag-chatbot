@@ -1,5 +1,5 @@
 {
-  "name": "insforge-rag",
+  "name": "rag-chatbot",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -9,11 +9,19 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@insforge/sdk": "^1.5.2",
+    "katex": "^0.18.7",
+    "lucide-react": "^1.47.0",
     "next": "16.3.5",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "react-markdown": "^10.1.0",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
   },
   "devDependencies": {
+    "@insforge/cli": "^0.2.8",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
