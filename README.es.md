@@ -12,8 +12,7 @@ preguntás, se recuperan los fragmentos más parecidos y se le pasan a un LLM co
 instrucción estricta: responder únicamente con ese contexto y, si la respuesta no está
 ahí, decir `no tengo esa información en mis documentos` en vez de inventar.
 
-Cada visitante ve solo sus documentos y sus chats, con aislamiento aplicado en la base de
-datos y no en el código de la aplicación.
+Cada visitante ve solo sus documentos y sus chats.
 
 No hay contraseñas ni formulario de alta: el registro está cerrado en el backend y el
 acceso con cuenta está desactivado por ahora. Todo el que llega recibe una cuenta
@@ -49,23 +48,17 @@ Solo administración (CLI / schedule)
   └── demo-seed, demo-cleanup ────► Postgres + API admin de auth
 ```
 
-**`ingest`** valida el token, reserva la cuota de almacenamiento, parte el texto en
-fragmentos de ~500 tokens con solapamiento, genera los embeddings en un solo lote y los
-inserta.
+**`ingest`** parte un documento en fragmentos de ~500 tokens, los embebe y los guarda.
 
-**`ask`** valida el token, descuenta una pregunta del cupo diario, embebe la consulta,
-recupera los 5 fragmentos más cercanos con `match_documents`, y se los pasa al LLM junto
-con la instrucción de no salirse de ese contexto. Devuelve la respuesta y sus fuentes con
-el score de similitud de cada una.
+**`ask`** embebe la pregunta, recupera los 5 fragmentos más cercanos con `match_documents`
+y devuelve la respuesta del LLM junto con sus fuentes.
 
-**`demo`** crea una cuenta descartable y le copia el corpus de demostración. Es pública, y
-la única puerta de entrada a una cuenta ahora que el registro está cerrado.
+**`demo`** crea una cuenta descartable con el corpus de demostración ya cargado.
 
-**`usage`** informa lo que queda: preguntas del día y espacio usado. Es una function y no
-una consulta directa porque el cupo se cuenta por IP, y la IP solo la ve el servidor.
+**`usage`** devuelve las preguntas que quedan en el día y el espacio usado.
 
 **`demo-seed`** carga un documento en el corpus plantilla. Solo con la API key de
-administración, desde la línea de comandos.
+administración.
 
 **`demo-cleanup`** borra las cuentas demo vencidas. Solo con la API key de administración,
 lo dispara un schedule diario.
@@ -80,84 +73,6 @@ lo dispara un schedule diario.
 | `question_log` | Append-only, cuenta el cupo diario por IP | Solo las functions |
 | `demo_files` / `demo_documents` | El corpus plantilla de la demo, sin dueño | Solo `demo-seed` |
 | `demo_sessions` | Marca qué cuentas son demo y cuándo nacieron | Solo `demo` |
-
-Borrar una fila de `ingested_files` arrastra sus fragmentos por la clave foránea y libera
-la cuota, así que el usuario puede administrar su espacio sin intervención.
-
----
-
-## Decisiones de diseño
-
-Las que tienen un porqué que no se ve leyendo el código.
-
-**`ask` busca con el cliente del usuario, no con el admin.**
-`match_documents` es `SECURITY INVOKER`, así que corre con el rol de quien la llama. Si
-la búsqueda usara el cliente admin, RLS quedaría fuera de juego y la búsqueda vectorial
-recorrería los documentos de todos los usuarios. La política de `documents` es lo único
-que los separa.
-
-**La cuota se reserva antes de generar un solo embedding.**
-`reserve_file` inserta la fila del archivo y devuelve si entra en el espacio disponible.
-Si algo falla después, esa fila se borra y el espacio vuelve. Al revés —verificar,
-trabajar, registrar— dos subidas simultáneas pasarían ambas con el último hueco libre.
-
-**El cupo se cuenta por IP, no por cuenta.**
-Con el registro cerrado y cada visitante recibiendo una cuenta nueva a pedido, un cupo por
-cuenta no acota nada: el contador se reinicia con un clic. La IP es la unidad más chica que
-un visitante no puede renovar apretando un botón. El costo es real y está asumido: detrás
-de un NAT compartido —una oficina, una universidad— todos comparten las mismas 5 preguntas.
-
-**La IP se lee desde la derecha de `x-forwarded-for`, no desde la izquierda.**
-Cualquiera puede mandar su propia cabecera `X-Forwarded-For`, y la infraestructura la
-extiende en vez de reemplazarla, así que la primera entrada es la que el visitante quiera.
-Un pedido desde `190.112.84.146` llega como `190.112.84.146, 10.0.3.7, 3.148.156.80`, y lo
-falsificado solo cae más a la izquierda. Contar dos saltos desde la derecha da la entrada
-que escribió la infraestructura de InsForge. Si la cadena llegara más corta de lo esperado,
-el código devuelve que no hay IP en vez de confiar en una falsificable.
-
-**Las filas de `question_log` sobreviven a la cuenta que las creó.**
-`owner_id` es nullable con `ON DELETE SET NULL`. Si las filas se fueran por CASCADE con la
-cuenta, la limpieza nocturna le regalaría a esa IP un cupo nuevo cada vez que corriera: el
-borrado desharía el límite que justamente tiene que preservar.
-
-**Contar y registrar una pregunta es una sola operación atómica.**
-`consume_question` toma un lock por IP, cuenta y registra en la misma transacción.
-Separado en dos pasos, dos pedidos concurrentes con el último crédito pasarían los dos.
-
-**Si falla el proveedor de modelos, se devuelve la pregunta.**
-Con un cupo de 5 diarias, perder una por un error ajeno al visitante es mala experiencia.
-`refund_question` borra el registro cuando la respuesta nunca llegó a generarse.
-
-**`question_log` no tiene políticas RLS, a propósito.**
-Sin políticas, `anon` y `authenticated` no pueden tocarla: solo la escriben las functions
-con el cliente admin. Si el visitante pudiera borrar sus filas, reiniciaría su propio
-límite diario.
-
-**El visitante de la demo recibe una cuenta real, no un modo especial.**
-La alternativa —una cuenta compartida, o una excepción en el código— significaría que
-todos los visitantes comparten un mismo historial y un mismo cupo. Como la cuenta demo es
-una fila de usuario común, pasa exactamente por las mismas políticas RLS que cualquier
-otra: el aislamiento entre visitantes es el que la aplicación ya tenía, y no un segundo
-mecanismo que podría discrepar del primero.
-
-**El corpus de la demo se embebe una vez y se copia, no se vuelve a embeber.**
-`demo_files` / `demo_documents` guardan los vectores sin dueño. Aprovisionar a un
-visitante es una copia en SQL: los mismos vectores, sin llamar a OpenRouter. Embeber por
-visitante costaría dinero para producir resultados idénticos a los ya guardados.
-
-**Hay un tope diario global por encima del de cada IP.**
-Un límite por IP acota a un visitante, no a la factura: conseguir IP es barato. El techo
-que realmente limita el gasto es `limit_demo_questions_per_day_global()`, contado sobre
-todos los pedidos del día.
-
-**El solapamiento arrastra oraciones completas, no caracteres.**
-La primera versión cortaba por cantidad de caracteres y dejaba fragmentos que empezaban a
-mitad de palabra (`"o anual de capacitación..."`). Además de verse mal, ensucia el
-embedding del fragmento.
-
-**El Markdown se renderiza sin `rehype-raw`.**
-El texto viene de un LLM que repite el contenido de archivos subidos por el usuario.
-Habilitar HTML crudo sería ejecutar HTML de terceros en la sesión.
 
 ---
 
@@ -177,63 +92,31 @@ Y tres que acotan el sistema como conjunto:
 | Cuentas demo nuevas por hora | 20 | `limit_demo_sessions_per_hour()` |
 | Vida de una cuenta demo | 24 h | `limit_demo_lifetime_hours()` |
 
-Todos viven **solo en SQL**. La UI los lee a través de la function `usage` y las functions
-los aplican con `reserve_file`, `consume_question` y `provision_demo_user`, así que no
-pueden desincronizarse: para cambiarlos se toca una función y nada más.
-
-El de 2 MiB no es arbitrario. Cada fragmento de ~500 tokens ocupa unos 6 KB solo en el
-vector (1536 floats × 4 bytes), así que 2 MiB de texto son ~1050 fragmentos ≈ 6,3 MB de
-vectores por usuario. En el plan gratuito de InsForge eso deja lugar para varias decenas
-de usuarios. En texto plano, 2 MiB son unas 600 páginas.
-
 El día se corta a **medianoche UTC**, no en el huso local.
 
 ---
 
 ## Modo demo
 
-Tocar **Probar demo** llama a la function `demo`, que:
+Tocar **Probar demo** crea una cuenta descartable con el corpus de ejemplo de
+[`demo-corpus/`](demo-corpus/) ya cargado — seis documentos sobre qué es un RAG, cómo está
+hecho este proyecto y quién lo hizo, en español e inglés. La cuenta se borra a las 24
+horas. El cupo diario se cuenta por IP, así que una cuenta nueva no lo reinicia.
 
-1. crea un usuario por la API de administración de auth, con una dirección aleatoria bajo
-   `@demo.invalid` y una contraseña aleatoria;
-2. llama a `provision_demo_user()`, que copia el corpus plantilla a las filas propias de
-   ese usuario en `ingested_files` / `documents` y registra la cuenta en `demo_sessions`;
-3. devuelve las credenciales de un solo uso, que el navegador usa enseguida para iniciar
-   sesión por el camino normal de contraseña.
-
-De ahí en adelante es una sesión común: el visitante puede preguntar, subir sus propios
-archivos y borrar cosas, todo dentro de su cuenta y sin tocar la de nadie más. Lo que la
-cuenta nueva **no** reinicia es el cupo diario, que sigue a la IP.
-
-Si el aprovisionamiento falla, la function borra el usuario que acababa de crear, así que
-un intento rechazado no deja una cuenta colgada.
-
-`demo-cleanup` corre todos los días a las 04:00 UTC y borra las cuentas más viejas que
-`limit_demo_lifetime_hours()`. Borrar al usuario arrastra sus archivos, fragmentos, chats
-y cupo consumido. Para purgar todas las cuentas demo ahora mismo, se le pasa una ventana
-de cero:
-
-```bash
-npx -y @insforge/cli functions invoke demo-cleanup --data '{"older_than_hours":0}'
-```
-
-### El corpus de la demo
-
-Los seis documentos viven en [`demo-corpus/`](demo-corpus/) y cubren qué es un RAG, cómo
-está hecho este proyecto y quién lo hizo, en español e inglés. Son la fuente de verdad
-legible; los vectores de la base se derivan de ellos.
-
-Para cargar o recargar uno (es el único paso que gasta embeddings):
+Cargar o recargar un documento en el corpus plantilla (es el único paso que gasta
+embeddings; volver a sembrar el mismo nombre reemplaza la versión anterior):
 
 ```bash
 npx -y @insforge/cli functions invoke demo-seed \
   --data "$(node scripts/demo-seed-payload.mjs demo-corpus/que-es-un-rag.md)"
 ```
 
-Volver a sembrar el mismo nombre reemplaza la versión anterior. En Windows la línea de
-comandos tiene un tope de ~32 KB, y por eso el corpus está partido en archivos enfocados
-en vez de dos largos — una división que además recupera mejor, por el motivo de
-[la medición pendiente](#una-medición-pendiente).
+Borrar las cuentas demo vencidas. Corre todos los días a las 04:00 UTC; una ventana de
+cero purga todas las cuentas demo ahora mismo:
+
+```bash
+npx -y @insforge/cli functions invoke demo-cleanup --data '{"older_than_hours":0}'
+```
 
 ---
 
@@ -264,8 +147,8 @@ npx -y @insforge/cli functions deploy demo-seed --file ./functions/demo-seed.ts
 npx -y @insforge/cli functions deploy demo-cleanup --file ./functions/demo-cleanup.ts
 ```
 
-Después se siembra el corpus una vez (ver [El corpus de la demo](#el-corpus-de-la-demo)) y
-se agenda la limpieza:
+Después se siembra el corpus una vez (ver [Modo demo](#modo-demo)) y se agenda la
+limpieza:
 
 ```bash
 npx -y @insforge/cli schedules create \
@@ -279,24 +162,9 @@ npx -y @insforge/cli schedules create \
 
 ### Configuración de auth
 
-[`insforge.toml`](insforge.toml) guarda la configuración de auth, y dos valores son
-estructurales:
-
-- `disable_signup = true` cierra el registro público. Lo rechaza el backend; la UI no está
-  simplemente escondiendo un formulario.
-- `require_email_verification = false` es lo que permite que una cuenta demo inicie sesión.
-  Las cuentas las crea la API de administración con una dirección `@demo.invalid` donde
-  nadie puede leer el correo, así que con la verificación activa se crean y quedan
-  bloqueadas.
-
-Los dos van juntos. Desactivar la verificación con el registro abierto permitiría que
-cualquiera se registre sin verificar, así que si algún día volvés a abrir `disable_signup`,
+[`insforge.toml`](insforge.toml) guarda la configuración de auth. `disable_signup = true` y
+`require_email_verification = false` van juntos: si algún día volvés a abrir el registro,
 reactivá la verificación en el mismo cambio.
-
-El formulario de contraseña también salió de la UI, así que hoy no hay forma de entrar a
-una cuenta con nombre. Para reponerlo hay que volver a poner el formulario en
-`AuthScreen.tsx` y llamar a `insforge.auth.signInWithPassword`; del lado del backend sigue
-funcionando.
 
 ### Variables de entorno
 

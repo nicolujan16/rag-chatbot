@@ -14,8 +14,7 @@ instruction: answer using that context only, and if the answer isn't there, say
 `no tengo esa información en mis documentos` ("I don't have that information in my
 documents") instead of making something up.
 
-Each visitor sees only their own documents and chats, with isolation enforced in the
-database rather than in application code.
+Each visitor sees only their own documents and chats.
 
 There are no passwords and no sign-up form: registration is closed in the backend and the
 password flow is turned off for now. Everyone who arrives gets a disposable account of
@@ -51,23 +50,16 @@ Admin only (CLI / schedule)
   └── demo-seed, demo-cleanup ────► Postgres + auth admin API
 ```
 
-**`ingest`** validates the token, reserves the storage quota, splits the text into chunks
-of ~500 tokens with overlap, generates the embeddings in a single batch, and inserts them.
+**`ingest`** splits a document into ~500-token chunks, embeds them and stores them.
 
-**`ask`** validates the token, deducts one question from the daily allowance, embeds the
-query, retrieves the 5 nearest chunks with `match_documents`, and passes them to the LLM
-together with the instruction not to step outside that context. It returns the answer and
-its sources, each with its similarity score.
+**`ask`** embeds the question, retrieves the 5 nearest chunks with `match_documents` and
+returns the LLM's answer plus its sources.
 
-**`demo`** creates a disposable account and copies the demo corpus into it. Public, and
-the only path to an account now that registration is closed.
+**`demo`** creates a disposable account with the demo corpus already loaded.
 
-**`usage`** reports what's left: questions for the day and storage used. It's a function
-rather than a plain query because the allowance is counted per IP, and only the server can
-see the caller's IP.
+**`usage`** returns the questions left for the day and the storage used.
 
-**`demo-seed`** loads one document into the template corpus. Admin key only, run from the
-CLI.
+**`demo-seed`** loads one document into the template corpus. Admin key only.
 
 **`demo-cleanup`** deletes expired demo accounts. Admin key only, run daily by a schedule.
 
@@ -81,86 +73,6 @@ CLI.
 | `question_log` | Append-only, counts the daily allowance per IP | Only the functions |
 | `demo_files` / `demo_documents` | The demo corpus template, with no owner | Only `demo-seed` |
 | `demo_sessions` | Marks which accounts are demo, and when they were born | Only `demo` |
-
-Deleting a row from `ingested_files` cascades to its chunks through the foreign key and
-frees the quota, so users can manage their own space without intervention.
-
----
-
-## Design decisions
-
-The ones whose reasoning isn't visible from reading the code.
-
-**`ask` searches with the user's client, not the admin one.**
-`match_documents` is `SECURITY INVOKER`, so it runs with the role of whoever calls it. If
-the search used the admin client, RLS would be out of the picture and the vector search
-would sweep across every user's documents. The policy on `documents` is the only thing
-keeping them apart.
-
-**The quota is reserved before a single embedding is generated.**
-`reserve_file` inserts the file row and reports whether it fits in the available space.
-If anything fails afterwards, that row is deleted and the space comes back. The other way
-around — check, work, record — two simultaneous uploads would both slip through on the
-last free slot.
-
-**The allowance is counted per IP, not per account.**
-With registration closed and every visitor getting a fresh account on demand, a per-account
-allowance bounds nothing: the counter resets with one click. The IP is the smallest unit a
-visitor can't renew by pressing a button. The cost is real and accepted: behind a shared
-NAT — an office, a university — everyone shares the same 5 questions.
-
-**The IP is read from the right of `x-forwarded-for`, not the left.**
-Anyone can send their own `X-Forwarded-For` header, and the infrastructure appends to it
-rather than replacing it, so the leftmost entry is whatever the visitor wants it to be. A
-request from `190.112.84.146` arrives as `190.112.84.146, 10.0.3.7, 3.148.156.80`, and a
-spoofed entry only lands further left. Counting two hops in from the right gives the entry
-that InsForge's own infrastructure wrote. If the chain ever comes up shorter than expected,
-the code returns no IP rather than trusting a forgeable one.
-
-**`question_log` rows outlive the account that created them.**
-`owner_id` is nullable with `ON DELETE SET NULL`. If the rows cascaded away with the
-account, the nightly cleanup would hand that IP a fresh allowance every day it happened to
-run — the deletion would undo the limit it's supposed to preserve.
-
-**Counting and recording a question is a single atomic operation.**
-`consume_question` takes a per-IP lock, counts, and records within the same transaction.
-Split into two steps, two concurrent requests holding the last credit would both go
-through.
-
-**If the model provider fails, the question is refunded.**
-With an allowance of 5 per day, losing one to an error that isn't the visitor's fault is a
-bad experience. `refund_question` deletes the record when the answer was never actually
-generated.
-
-**`question_log` has no RLS policies, on purpose.**
-With no policies, `anon` and `authenticated` cannot touch it: only the functions write to
-it, using the admin client. If visitors could delete their own rows, they would reset
-their own daily limit.
-
-**A demo visitor gets a real account, not a special mode.**
-The alternative — one shared account, or a bypass in the code — would mean every visitor
-sharing one chat history and one allowance. Because the demo account is an ordinary user
-row, it goes through exactly the same RLS policies as anyone else, so isolation between
-visitors is the isolation the app already had, not a second mechanism that could disagree
-with the first.
-
-**The demo corpus is embedded once and copied, not re-embedded.**
-`demo_files` / `demo_documents` hold the vectors with no owner. Provisioning a visitor is
-a SQL copy: same vectors, no call to OpenRouter. Embedding per visitor would cost money
-to produce results identical to the ones already stored.
-
-**There is a global daily cap above the per-IP one.**
-Per-IP limits bound one visitor, not the bill: IPs are cheap to come by. The ceiling that
-actually limits spend is `limit_demo_questions_per_day_global()`, counted across every
-request of the day.
-
-**The overlap carries whole sentences, not characters.**
-The first version cut by character count and left chunks starting mid-word (`"nnual
-training plan..."`). Beyond looking bad, it pollutes the chunk's embedding.
-
-**Markdown is rendered without `rehype-raw`.**
-The text comes from an LLM echoing the contents of files the user uploaded. Enabling raw
-HTML would mean executing third-party HTML in the session.
 
 ---
 
@@ -180,63 +92,31 @@ And three that bound the system as a whole:
 | New demo accounts per hour | 20 | `limit_demo_sessions_per_hour()` |
 | Demo account lifetime | 24 h | `limit_demo_lifetime_hours()` |
 
-All of them live **in SQL only**. The UI reads them through the `usage` function and the
-functions enforce them through `reserve_file`, `consume_question` and
-`provision_demo_user`, so they cannot drift apart: changing one means touching a single
-function and nothing else.
-
-The 2 MiB figure isn't arbitrary. Each ~500-token chunk takes about 6 KB in the vector
-alone (1536 floats × 4 bytes), so 2 MiB of text is ~1050 chunks ≈ 6.3 MB of vectors per
-user. On InsForge's free plan that leaves room for several dozen users. In plain text,
-2 MiB is roughly 600 pages.
-
 The day rolls over at **UTC midnight**, not in the local time zone.
 
 ---
 
 ## Demo mode
 
-Clicking **Probar demo** calls the `demo` function, which:
+Clicking **Probar demo** creates a disposable account with the sample corpus from
+[`demo-corpus/`](demo-corpus/) already loaded — six documents on what RAG is, how this
+project is built, and who built it, in Spanish and English. The account is deleted after
+24 hours. The daily allowance is counted per IP, so a new account does not reset it.
 
-1. creates a user through the auth admin API, with a random address under `@demo.invalid`
-   and a random password;
-2. calls `provision_demo_user()`, which copies the template corpus into that user's own
-   `ingested_files` / `documents` rows and records the account in `demo_sessions`;
-3. returns the one-time credentials, which the browser immediately uses to sign in through
-   the ordinary password flow.
-
-From there it is a normal session: the visitor can ask, upload their own files, and delete
-things, all inside their own account and without touching anyone else's. What the fresh
-account does **not** reset is the daily allowance, which follows the IP.
-
-If provisioning fails the function deletes the user it just created, so a rejected attempt
-doesn't leave an account behind.
-
-`demo-cleanup` runs daily at 04:00 UTC and deletes accounts older than
-`limit_demo_lifetime_hours()`. Deleting the user cascades to their files, chunks, chats
-and consumed allowance. To purge every demo account right now, pass a zero window:
-
-```bash
-npx -y @insforge/cli functions invoke demo-cleanup --data '{"older_than_hours":0}'
-```
-
-### The demo corpus
-
-The six documents live in [`demo-corpus/`](demo-corpus/) and cover what RAG is, how this
-project is built, and who built it, in Spanish and English. They are the readable source
-of truth; the vectors in the database are derived from them.
-
-To load or reload one (this is the only step that spends embeddings):
+Load or reload one document into the template corpus (the only step that spends
+embeddings; seeding the same file name again replaces the previous version):
 
 ```bash
 npx -y @insforge/cli functions invoke demo-seed \
   --data "$(node scripts/demo-seed-payload.mjs demo-corpus/que-es-un-rag.md)"
 ```
 
-Seeding the same file name again replaces the previous version. On Windows, the shell caps
-the command line at ~32 KB, which is why the corpus is split into focused files rather than
-two long ones — a split that also retrieves better, for the reason in
-[the pending measurement](#one-measurement-still-pending).
+Delete expired demo accounts. This runs daily at 04:00 UTC; a zero window purges every
+demo account right now:
+
+```bash
+npx -y @insforge/cli functions invoke demo-cleanup --data '{"older_than_hours":0}'
+```
 
 ---
 
@@ -267,8 +147,7 @@ npx -y @insforge/cli functions deploy demo-seed --file ./functions/demo-seed.ts
 npx -y @insforge/cli functions deploy demo-cleanup --file ./functions/demo-cleanup.ts
 ```
 
-Then seed the corpus once (see [The demo corpus](#the-demo-corpus)) and schedule the
-cleanup:
+Then seed the corpus once (see [Demo mode](#demo-mode)) and schedule the cleanup:
 
 ```bash
 npx -y @insforge/cli schedules create \
@@ -282,21 +161,9 @@ npx -y @insforge/cli schedules create \
 
 ### Auth configuration
 
-[`insforge.toml`](insforge.toml) holds the auth settings, and two of them are load-bearing:
-
-- `disable_signup = true` closes public registration. The backend refuses it; the UI isn't
-  merely hiding a form.
-- `require_email_verification = false` is what lets a demo account sign in. Accounts are
-  created by the admin API with a `@demo.invalid` address that no one can read mail at, so
-  with verification on they are created and then locked out.
-
-Those two belong together. Turning verification off while registration is open would let
-anyone register unverified, so if you ever reopen `disable_signup`, turn verification back
-on in the same change.
-
-The password form is also gone from the UI, so today there is no way to sign into a named
-account at all. Restoring it means putting the form back in `AuthScreen.tsx` and calling
-`insforge.auth.signInWithPassword` — the backend side still works.
+[`insforge.toml`](insforge.toml) holds the auth settings. `disable_signup = true` and
+`require_email_verification = false` go together: if you ever reopen registration, turn
+verification back on in the same change.
 
 ### Environment variables
 

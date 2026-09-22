@@ -54,3 +54,6 @@ next-env.d.ts
 .roo
 .trae
 .windsurf
+
+# Notas de estudio personales, no se comparten
+notas-estudio/
