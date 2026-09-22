@@ -1,202 +1,208 @@
 # RAG Chatbot
 
-Chat que responde **solo** con lo que dicen tus documentos, y que admite no saber.
+*[Versión en español](README.es.md)*
 
-Subís archivos de texto, se parten en fragmentos y se indexan como vectores. Cuando
-preguntás, se recuperan los fragmentos más parecidos y se le pasan a un LLM con una
-instrucción estricta: responder únicamente con ese contexto y, si la respuesta no está
-ahí, decir `no tengo esa información en mis documentos` en vez de inventar.
+A chat that answers **only** with what your documents say, and that is allowed to admit
+it doesn't know.
 
-Cada usuario ve solo sus documentos y sus chats, con aislamiento aplicado en la base de
-datos y no en el código de la aplicación.
+You upload text files, they get split into chunks and indexed as vectors. When you ask
+something, the closest chunks are retrieved and handed to an LLM under a strict
+instruction: answer using that context only, and if the answer isn't there, say
+`no tengo esa información en mis documentos` ("I don't have that information in my
+documents") instead of making something up.
+
+Each user sees only their own documents and chats, with isolation enforced in the
+database rather than in application code.
 
 ---
 
 ## Stack
 
-| Capa | Tecnología |
+| Layer | Technology |
 |---|---|
 | Frontend | Next.js 16 (App Router), React 19, Tailwind v4 |
-| Backend | InsForge — Postgres, auth, edge functions en Deno |
-| Vectores | pgvector con índice HNSW y distancia coseno |
-| Modelos | OpenRouter — `text-embedding-3-small` (1536 dims) y `gpt-4o-mini` |
+| Backend | InsForge — Postgres, auth, edge functions on Deno |
+| Vectors | pgvector with an HNSW index and cosine distance |
+| Models | OpenRouter — `text-embedding-3-small` (1536 dims) and `gpt-4o-mini` |
 
-## Arquitectura
+## Architecture
 
 ```
-Navegador (Next.js)
+Browser (Next.js)
   │
-  ├── @insforge/sdk ──────────────► Postgres vía PostgREST
-  │     auth, chats, archivos        RLS filtra por auth.uid()
+  ├── @insforge/sdk ──────────────► Postgres via PostgREST
+  │     auth, chats, files           RLS filters by auth.uid()
   │
   └── functions.invoke ───────────► Edge functions (Deno)
         ingest / ask                  │
                                       ├──► OpenRouter  (embeddings + chat)
-                                      └──► Postgres    (pgvector + cuotas)
+                                      └──► Postgres    (pgvector + quotas)
 ```
 
-**`ingest`** valida el token, reserva la cuota de almacenamiento, parte el texto en
-fragmentos de ~500 tokens con solapamiento, genera los embeddings en un solo lote y los
-inserta.
+**`ingest`** validates the token, reserves the storage quota, splits the text into chunks
+of ~500 tokens with overlap, generates the embeddings in a single batch, and inserts
+them.
 
-**`ask`** valida el token, descuenta una pregunta del cupo diario, embebe la consulta,
-recupera los 5 fragmentos más cercanos con `match_documents`, y se los pasa al LLM junto
-con la instrucción de no salirse de ese contexto. Devuelve la respuesta y sus fuentes con
-el score de similitud de cada una.
+**`ask`** validates the token, deducts one question from the daily allowance, embeds the
+query, retrieves the 5 nearest chunks with `match_documents`, and passes them to the LLM
+together with the instruction not to step outside that context. It returns the answer and
+its sources, each with its similarity score.
 
-## Modelo de datos
+## Data model
 
-| Tabla | Para qué | Quién escribe |
+| Table | What it's for | Who writes to it |
 |---|---|---|
-| `documents` | Fragmentos con su `embedding vector(1536)` | Solo las functions (cliente admin) |
-| `ingested_files` | Un archivo por fila, con sus bytes: es el contador de la cuota | Functions; el usuario puede borrar |
-| `conversations` / `messages` | Historial del chat | El navegador con el token del usuario |
-| `question_log` | Append-only, cuenta el cupo diario | Solo las functions |
+| `documents` | Chunks with their `embedding vector(1536)` | Only the functions (admin client) |
+| `ingested_files` | One row per file, with its byte count: this is the quota counter | Functions; the user can delete |
+| `conversations` / `messages` | Chat history | The browser, with the user's token |
+| `question_log` | Append-only, counts the daily allowance | Only the functions |
 
-Borrar una fila de `ingested_files` arrastra sus fragmentos por la clave foránea y libera
-la cuota, así que el usuario puede administrar su espacio sin intervención.
-
----
-
-## Decisiones de diseño
-
-Las que tienen un porqué que no se ve leyendo el código.
-
-**`ask` busca con el cliente del usuario, no con el admin.**
-`match_documents` es `SECURITY INVOKER`, así que corre con el rol de quien la llama. Si
-la búsqueda usara el cliente admin, RLS quedaría fuera de juego y la búsqueda vectorial
-recorrería los documentos de todos los usuarios. La política de `documents` es lo único
-que los separa.
-
-**La cuota se reserva antes de generar un solo embedding.**
-`reserve_file` inserta la fila del archivo y devuelve si entra en el espacio disponible.
-Si algo falla después, esa fila se borra y el espacio vuelve. Al revés —verificar,
-trabajar, registrar— dos subidas simultáneas pasarían ambas con el último hueco libre.
-
-**Contar y registrar una pregunta es una sola operación atómica.**
-`consume_question` toma un lock por usuario, cuenta y registra en la misma transacción.
-Separado en dos pasos, dos pedidos concurrentes con el último crédito pasarían los dos.
-
-**Si falla el proveedor de modelos, se devuelve la pregunta.**
-Con un cupo de 5 diarias, perder una por un error ajeno al usuario es mala experiencia.
-`refund_question` borra el registro cuando la respuesta nunca llegó a generarse.
-
-**`question_log` no tiene políticas RLS, a propósito.**
-Sin políticas, `anon` y `authenticated` no pueden tocarla: solo la escriben las functions
-con el cliente admin. Si el usuario pudiera borrar sus filas, reiniciaría su propio
-límite diario.
-
-**El solapamiento arrastra oraciones completas, no caracteres.**
-La primera versión cortaba por cantidad de caracteres y dejaba fragmentos que empezaban a
-mitad de palabra (`"o anual de capacitación..."`). Además de verse mal, ensucia el
-embedding del fragmento.
-
-**El Markdown se renderiza sin `rehype-raw`.**
-El texto viene de un LLM que repite el contenido de archivos subidos por el usuario.
-Habilitar HTML crudo sería ejecutar HTML de terceros en la sesión.
+Deleting a row from `ingested_files` cascades to its chunks through the foreign key and
+frees the quota, so users can manage their own space without intervention.
 
 ---
 
-## Límites por usuario
+## Design decisions
 
-| Límite | Valor | Dónde vive |
+The ones whose reasoning isn't visible from reading the code.
+
+**`ask` searches with the user's client, not the admin one.**
+`match_documents` is `SECURITY INVOKER`, so it runs with the role of whoever calls it. If
+the search used the admin client, RLS would be out of the picture and the vector search
+would sweep across every user's documents. The policy on `documents` is the only thing
+keeping them apart.
+
+**The quota is reserved before a single embedding is generated.**
+`reserve_file` inserts the file row and reports whether it fits in the available space.
+If anything fails afterwards, that row is deleted and the space comes back. The other way
+around — check, work, record — two simultaneous uploads would both slip through on the
+last free slot.
+
+**Counting and recording a question is a single atomic operation.**
+`consume_question` takes a per-user lock, counts, and records within the same
+transaction. Split into two steps, two concurrent requests holding the last credit would
+both go through.
+
+**If the model provider fails, the question is refunded.**
+With an allowance of 5 per day, losing one to an error that isn't the user's fault is a
+bad experience. `refund_question` deletes the record when the answer was never actually
+generated.
+
+**`question_log` has no RLS policies, on purpose.**
+With no policies, `anon` and `authenticated` cannot touch it: only the functions write to
+it, using the admin client. If users could delete their own rows, they would reset their
+own daily limit.
+
+**The overlap carries whole sentences, not characters.**
+The first version cut by character count and left chunks starting mid-word (`"nnual
+training plan..."`). Beyond looking bad, it pollutes the chunk's embedding.
+
+**Markdown is rendered without `rehype-raw`.**
+The text comes from an LLM echoing the contents of files the user uploaded. Enabling raw
+HTML would mean executing third-party HTML in the session.
+
+---
+
+## Per-user limits
+
+| Limit | Value | Where it lives |
 |---|---|---|
-| Preguntas por día | 5 | `limit_questions_per_day()` |
-| Almacenamiento total | 2 MiB de texto | `limit_storage_bytes()` |
-| Tamaño por archivo | 1 MiB | `limit_file_bytes()` |
+| Questions per day | 5 | `limit_questions_per_day()` |
+| Total storage | 2 MiB of text | `limit_storage_bytes()` |
+| Size per file | 1 MiB | `limit_file_bytes()` |
 
-Los tres viven **solo en SQL**. La UI los lee con `my_usage()` y las functions los aplican
-a través de `reserve_file` y `consume_question`, así que no pueden desincronizarse: para
-cambiarlos se toca una función y nada más.
+All three live **in SQL only**. The UI reads them with `my_usage()` and the functions
+enforce them through `reserve_file` and `consume_question`, so they cannot drift apart:
+changing one means touching a single function and nothing else.
 
-El de 2 MiB no es arbitrario. Cada fragmento de ~500 tokens ocupa unos 6 KB solo en el
-vector (1536 floats × 4 bytes), así que 2 MiB de texto son ~1050 fragmentos ≈ 6,3 MB de
-vectores por usuario. En el plan gratuito de InsForge eso deja lugar para varias decenas
-de usuarios. En texto plano, 2 MiB son unas 600 páginas.
+The 2 MiB figure isn't arbitrary. Each ~500-token chunk takes about 6 KB in the vector
+alone (1536 floats × 4 bytes), so 2 MiB of text is ~1050 chunks ≈ 6.3 MB of vectors per
+user. On InsForge's free plan that leaves room for several dozen users. In plain text,
+2 MiB is roughly 600 pages.
 
-El día se corta a **medianoche UTC**, no en el huso local.
+The day rolls over at **UTC midnight**, not in the local time zone.
 
 ---
 
-## Puesta en marcha
+## Getting started
 
-Requiere Node 20+, una cuenta de InsForge y una clave de OpenRouter.
+Requires Node 20+, an InsForge account, and an OpenRouter key.
 
 ```bash
 npm install
 
-# Backend: vincular el proyecto y aplicar el esquema
+# Backend: link the project and apply the schema
 npx -y @insforge/cli login
-npx -y @insforge/cli link --project-id <tu-project-id>
+npx -y @insforge/cli link --project-id <your-project-id>
 npx -y @insforge/cli db migrations up --all
 
-# La clave de OpenRouter va como secret del backend, nunca en el repo.
-# Los secrets se inyectan al desplegar: si la rotás, hay que volver a
-# desplegar ambas functions para que la tomen.
+# The OpenRouter key goes in as a backend secret, never in the repo.
+# Secrets are injected at deploy time: if you rotate it, both functions
+# have to be redeployed to pick it up.
 npx -y @insforge/cli secrets add OPENROUTER_API_KEY sk-or-v1-...
 npx -y @insforge/cli functions deploy ingest --file ./functions/ingest.ts
 npx -y @insforge/cli functions deploy ask --file ./functions/ask.ts
 ```
 
-`.env.local` con los valores de tu proyecto:
+`.env.local` with your project's values:
 
 ```bash
-NEXT_PUBLIC_INSFORGE_URL=https://<tu-proyecto>.insforge.app
+NEXT_PUBLIC_INSFORGE_URL=https://<your-project>.insforge.app
 NEXT_PUBLIC_INSFORGE_ANON_KEY=anon_...
 ```
 
-Ambas son públicas por diseño: la clave anónima solo habilita lo que permitan las
-políticas RLS. La clave de administrador nunca sale del backend.
+Both are public by design: the anonymous key only unlocks what the RLS policies allow.
+The admin key never leaves the backend.
 
 ```bash
 npm run dev
 ```
 
-### Los endpoints por HTTP
+### The endpoints over HTTP
 
-Las dos functions exigen un `Bearer` válido; sin él devuelven 401.
+Both functions require a valid `Bearer` token; without one they return 401.
 
 ```bash
-curl -X POST "https://<tu-proyecto>.insforge.app/functions/ingest" \
+curl -X POST "https://<your-project>.insforge.app/functions/ingest" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
   -d '{"source": "manual.md", "text": "..."}'
 
-curl -X POST "https://<tu-proyecto>.insforge.app/functions/ask" \
+curl -X POST "https://<your-project>.insforge.app/functions/ask" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
-  -d '{"question": "¿Qué dice el manual sobre el mantenimiento?"}'
+  -d '{"question": "What does the manual say about maintenance?"}'
 ```
 
 ---
 
-## Estado y limitaciones conocidas
+## Status and known limitations
 
-Lo que todavía no hace, dicho de frente:
+What it doesn't do yet, stated plainly:
 
-- **Solo texto plano** (`.txt`, `.md`, `.csv`, `.json`). Sin PDF.
-- **Sin memoria conversacional.** Cada pregunta viaja sola al modelo: los mensajes
-  anteriores se guardan y se muestran, pero no entran al prompt. Un "¿y cuánto sale el
-  Pro?" después de una tabla no funciona.
-- **Sin streaming.** La respuesta aparece completa al terminar.
-- **Sin tope global de gasto.** El alta es abierta y cada usuario nuevo son 5 preguntas
-  diarias contra la clave de OpenRouter del dueño del proyecto.
-- **Recuperación sin umbral.** `match_documents` devuelve siempre los 5 más cercanos, aun
-  si son irrelevantes; quien filtra es el prompt del modelo.
-- **Sin tests automatizados.**
+- **Plain text only** (`.txt`, `.md`, `.csv`, `.json`). No PDF.
+- **No conversational memory.** Each question travels to the model on its own: earlier
+  messages are stored and displayed, but they don't go into the prompt. An "and how much
+  is the Pro one?" after a table won't work.
+- **No streaming.** The answer appears all at once when it's done.
+- **No global spend cap.** Sign-up is open, and every new user means 5 daily questions
+  against the project owner's OpenRouter key.
+- **Retrieval without a threshold.** `match_documents` always returns the 5 nearest
+  chunks, even when they're irrelevant; the filtering is left to the model's prompt.
+- **No automated tests.**
 
-### Una medición pendiente
+### One measurement still pending
 
-Durante el desarrollo apareció algo que vale la pena dejar anotado: con fragmentos de 500
-tokens sobre documentos cortos, los scores de similitud caen a ~0.35 y en una prueba el
-fragmento correcto quedó **segundo** (0.3505 contra 0.3698 de uno irrelevante). La
-respuesta salió bien igual, porque con pocos fragmentos y `match_count: 5` entra todo al
-contexto y el modelo filtra.
+Something came up during development that's worth writing down: with 500-token chunks
+over short documents, similarity scores drop to ~0.35, and in one test the correct chunk
+came in **second** (0.3505 against 0.3698 for an irrelevant one). The answer still came
+out right, because with few chunks and `match_count: 5` everything makes it into the
+context and the model does the filtering.
 
-Los embeddings no son el problema: verificado directamente contra OpenRouter, dan 0.86
-entre paráfrasis y 0.15 entre temas no relacionados. Lo que pasa es que un fragmento de
-500 tokens puede cubrir dos temas distintos y eso diluye la señal. Con documentos más
-cortos y enfocados los scores suben a 0.55-0.67 y el orden se corrige.
+The embeddings aren't the problem: checked directly against OpenRouter, they give 0.86
+between paraphrases and 0.15 between unrelated topics. What happens is that a 500-token
+chunk can cover two different topics, and that dilutes the signal. With shorter, more
+focused documents the scores rise to 0.55-0.67 and the ordering corrects itself.
 
-Cerrar esto pide un set de evaluación con métricas de recuperación (recall@k, MRR) y un
-barrido de tamaños de fragmento. Es el próximo paso natural del proyecto.
+Closing this out calls for an evaluation set with retrieval metrics (recall@k, MRR) and a
+sweep over chunk sizes. It's the natural next step for the project.
