@@ -1,6 +1,6 @@
 [auth]
 allowed_redirect_urls = []
-require_email_verification = true
+require_email_verification = false
 verify_email_method = "code"
 reset_password_method = "code"
 disable_signup = true
