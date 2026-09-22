@@ -5,7 +5,7 @@
 A chat that answers **only** with what your documents say, and that is allowed to admit
 it doesn't know.
 
-**Live: [39237v7a.insforge.site](https://39237v7a.insforge.site)** — no sign-up needed,
+**Live: [ragchatbot.insforge.site](https://ragchatbot.insforge.site)** — no sign-up needed,
 click **Probar demo** ("Try the demo").
 
 You upload text files, they get split into chunks and indexed as vectors. When you ask

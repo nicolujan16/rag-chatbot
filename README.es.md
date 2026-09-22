@@ -4,7 +4,7 @@
 
 Chat que responde **solo** con lo que dicen tus documentos, y que admite no saber.
 
-**En vivo: [39237v7a.insforge.site](https://39237v7a.insforge.site)** — no hace falta
+**En vivo: [ragchatbot.insforge.site](https://ragchatbot.insforge.site)** — no hace falta
 registrarse, tocá **Probar demo**.
 
 Subís archivos de texto, se parten en fragmentos y se indexan como vectores. Cuando
