@@ -14,11 +14,13 @@ instruction: answer using that context only, and if the answer isn't there, say
 `no tengo esa información en mis documentos` ("I don't have that information in my
 documents") instead of making something up.
 
-Each user sees only their own documents and chats, with isolation enforced in the
+Each visitor sees only their own documents and chats, with isolation enforced in the
 database rather than in application code.
 
-Public registration is closed. The only way in without credentials is the demo button,
-which hands you a disposable account that deletes itself — see [Demo mode](#demo-mode).
+There are no passwords and no sign-up form: registration is closed in the backend and the
+password flow is turned off for now. Everyone who arrives gets a disposable account of
+their own, and the daily allowance is counted per IP address rather than per account —
+see [Demo mode](#demo-mode).
 
 ---
 
@@ -41,7 +43,7 @@ Browser (Next.js)
   │     auth, chats, files           RLS filters by auth.uid()
   │
   └── functions.invoke ───────────► Edge functions (Deno)
-        ingest / ask / demo           │
+        demo / ingest / ask / usage   │
                                       ├──► OpenRouter  (embeddings + chat)
                                       └──► Postgres    (pgvector + quotas)
 
@@ -60,6 +62,10 @@ its sources, each with its similarity score.
 **`demo`** creates a disposable account and copies the demo corpus into it. Public, and
 the only path to an account now that registration is closed.
 
+**`usage`** reports what's left: questions for the day and storage used. It's a function
+rather than a plain query because the allowance is counted per IP, and only the server can
+see the caller's IP.
+
 **`demo-seed`** loads one document into the template corpus. Admin key only, run from the
 CLI.
 
@@ -72,7 +78,7 @@ CLI.
 | `documents` | Chunks with their `embedding vector(1536)` | Only the functions (admin client) |
 | `ingested_files` | One row per file, with its byte count: this is the quota counter | Functions; the user can delete |
 | `conversations` / `messages` | Chat history | The browser, with the user's token |
-| `question_log` | Append-only, counts the daily allowance | Only the functions |
+| `question_log` | Append-only, counts the daily allowance per IP | Only the functions |
 | `demo_files` / `demo_documents` | The demo corpus template, with no owner | Only `demo-seed` |
 | `demo_sessions` | Marks which accounts are demo, and when they were born | Only `demo` |
 
@@ -97,20 +103,39 @@ If anything fails afterwards, that row is deleted and the space comes back. The 
 around — check, work, record — two simultaneous uploads would both slip through on the
 last free slot.
 
+**The allowance is counted per IP, not per account.**
+With registration closed and every visitor getting a fresh account on demand, a per-account
+allowance bounds nothing: the counter resets with one click. The IP is the smallest unit a
+visitor can't renew by pressing a button. The cost is real and accepted: behind a shared
+NAT — an office, a university — everyone shares the same 5 questions.
+
+**The IP is read from the right of `x-forwarded-for`, not the left.**
+Anyone can send their own `X-Forwarded-For` header, and the infrastructure appends to it
+rather than replacing it, so the leftmost entry is whatever the visitor wants it to be. A
+request from `190.112.84.146` arrives as `190.112.84.146, 10.0.3.7, 3.148.156.80`, and a
+spoofed entry only lands further left. Counting two hops in from the right gives the entry
+that InsForge's own infrastructure wrote. If the chain ever comes up shorter than expected,
+the code returns no IP rather than trusting a forgeable one.
+
+**`question_log` rows outlive the account that created them.**
+`owner_id` is nullable with `ON DELETE SET NULL`. If the rows cascaded away with the
+account, the nightly cleanup would hand that IP a fresh allowance every day it happened to
+run — the deletion would undo the limit it's supposed to preserve.
+
 **Counting and recording a question is a single atomic operation.**
-`consume_question` takes a per-user lock, counts, and records within the same
-transaction. Split into two steps, two concurrent requests holding the last credit would
-both go through.
+`consume_question` takes a per-IP lock, counts, and records within the same transaction.
+Split into two steps, two concurrent requests holding the last credit would both go
+through.
 
 **If the model provider fails, the question is refunded.**
-With an allowance of 5 per day, losing one to an error that isn't the user's fault is a
+With an allowance of 5 per day, losing one to an error that isn't the visitor's fault is a
 bad experience. `refund_question` deletes the record when the answer was never actually
 generated.
 
 **`question_log` has no RLS policies, on purpose.**
 With no policies, `anon` and `authenticated` cannot touch it: only the functions write to
-it, using the admin client. If users could delete their own rows, they would reset their
-own daily limit.
+it, using the admin client. If visitors could delete their own rows, they would reset
+their own daily limit.
 
 **A demo visitor gets a real account, not a special mode.**
 The alternative — one shared account, or a bypass in the code — would mean every visitor
@@ -124,10 +149,10 @@ with the first.
 a SQL copy: same vectors, no call to OpenRouter. Embedding per visitor would cost money
 to produce results identical to the ones already stored.
 
-**The demo has a global daily cap, not just a per-account one.**
-A per-account allowance bounds nothing when anyone can ask for a new account. The cap
-that actually limits spend is `limit_demo_questions_per_day_global()`; the per-account
-one only keeps a single visitor from eating the whole budget.
+**There is a global daily cap above the per-IP one.**
+Per-IP limits bound one visitor, not the bill: IPs are cheap to come by. The ceiling that
+actually limits spend is `limit_demo_questions_per_day_global()`, counted across every
+request of the day.
 
 **The overlap carries whole sentences, not characters.**
 The first version cut by character count and left chunks starting mid-word (`"nnual
@@ -139,25 +164,26 @@ HTML would mean executing third-party HTML in the session.
 
 ---
 
-## Per-user limits
+## Limits
 
-| Limit | Normal account | Demo account | Where it lives |
+| Limit | Value | Counted per | Where it lives |
 |---|---|---|---|
-| Questions per day | 5 | 50 | `limit_questions_per_day()` / `limit_demo_questions_per_day()` |
-| Total storage | 2 MiB of text | 2 MiB of text | `limit_storage_bytes()` |
-| Size per file | 1 MiB | 1 MiB | `limit_file_bytes()` |
+| Questions per day | 5 | IP address | `limit_questions_per_ip_per_day()` |
+| Total storage | 2 MiB of text | account | `limit_storage_bytes()` |
+| Size per file | 1 MiB | file | `limit_file_bytes()` |
 
-And three that bound the demo as a whole:
+And three that bound the system as a whole:
 
 | Limit | Value | Where it lives |
 |---|---|---|
-| Demo questions per day, all accounts | 300 | `limit_demo_questions_per_day_global()` |
+| Questions per day, everyone combined | 300 | `limit_demo_questions_per_day_global()` |
 | New demo accounts per hour | 20 | `limit_demo_sessions_per_hour()` |
 | Demo account lifetime | 24 h | `limit_demo_lifetime_hours()` |
 
-All of them live **in SQL only**. The UI reads them with `my_usage()` and the functions
-enforce them through `reserve_file`, `consume_question` and `provision_demo_user`, so they
-cannot drift apart: changing one means touching a single function and nothing else.
+All of them live **in SQL only**. The UI reads them through the `usage` function and the
+functions enforce them through `reserve_file`, `consume_question` and
+`provision_demo_user`, so they cannot drift apart: changing one means touching a single
+function and nothing else.
 
 The 2 MiB figure isn't arbitrary. Each ~500-token chunk takes about 6 KB in the vector
 alone (1536 floats × 4 bytes), so 2 MiB of text is ~1050 chunks ≈ 6.3 MB of vectors per
@@ -180,7 +206,8 @@ Clicking **Probar demo** calls the `demo` function, which:
    the ordinary password flow.
 
 From there it is a normal session: the visitor can ask, upload their own files, and delete
-things, all inside their own account and without touching anyone else's.
+things, all inside their own account and without touching anyone else's. What the fresh
+account does **not** reset is the daily allowance, which follows the IP.
 
 If provisioning fails the function deletes the user it just created, so a rejected attempt
 doesn't leave an account behind.
@@ -234,6 +261,7 @@ npx -y @insforge/cli config apply
 npx -y @insforge/cli secrets add OPENROUTER_API_KEY sk-or-v1-...
 npx -y @insforge/cli functions deploy ingest --file ./functions/ingest.ts
 npx -y @insforge/cli functions deploy ask --file ./functions/ask.ts
+npx -y @insforge/cli functions deploy usage --file ./functions/usage.ts
 npx -y @insforge/cli functions deploy demo --file ./functions/demo.ts
 npx -y @insforge/cli functions deploy demo-seed --file ./functions/demo-seed.ts
 npx -y @insforge/cli functions deploy demo-cleanup --file ./functions/demo-cleanup.ts
@@ -266,6 +294,10 @@ Those two belong together. Turning verification off while registration is open w
 anyone register unverified, so if you ever reopen `disable_signup`, turn verification back
 on in the same change.
 
+The password form is also gone from the UI, so today there is no way to sign into a named
+account at all. Restoring it means putting the form back in `AuthScreen.tsx` and calling
+`insforge.auth.signInWithPassword` — the backend side still works.
+
 ### Environment variables
 
 `.env.local` for local development:
@@ -293,8 +325,8 @@ npm run dev
 
 ### The endpoints over HTTP
 
-`ingest` and `ask` require a valid `Bearer` token; without one they return 401. `demo`
-takes the anon key, like any public function.
+`ingest`, `ask` and `usage` require a valid `Bearer` token; without one they return 401.
+`demo` takes the anon key, like any public function.
 
 ```bash
 curl -X POST "https://<your-project>.insforge.app/functions/ingest" \
@@ -321,9 +353,11 @@ What it doesn't do yet, stated plainly:
 - **No streaming.** The answer appears all at once when it's done.
 - **Retrieval without a threshold.** `match_documents` always returns the 5 nearest
   chunks, even when they're irrelevant; the filtering is left to the model's prompt.
-- **Spend is capped for the demo, not for the project.** The demo's global daily cap
-  bounds what anonymous visitors can spend, but a named account still has its own 5 daily
-  questions on top of that, and nothing watches the OpenRouter balance itself.
+- **The IP limit is a speed bump, not a wall.** It stops casual repeat use; it does not
+  stop anyone with a VPN or a phone on mobile data. The global daily cap is what actually
+  bounds the bill, and nothing watches the OpenRouter balance itself.
+- **Shared IPs share the allowance.** Behind an office or campus NAT, the first five
+  questions of the day use up everyone's.
 - **The demo corpus is duplicated per visitor.** 16 chunks ≈ 100 KB of vectors per demo
   account. Fine at this scale; a shared read-only corpus would scale better.
 - **`demo-seed` repeats `ingest`'s chunking code.** Edge functions deploy as single files

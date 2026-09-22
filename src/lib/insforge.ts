@@ -106,9 +106,12 @@ function unwrap<T>(result: { data: T | null; error: unknown }): T {
   return (result.data ?? []) as T;
 }
 
-export async function fetchUsage(): Promise<Usage> {
-  const rows = unwrap<Usage[]>(await insforge.database.rpc("my_usage"));
-  return rows[0];
+/**
+ * El cupo se cuenta por IP, y la IP solo la ve el servidor: por eso esto es una
+ * edge function y no una consulta directa a la base como el resto del panel.
+ */
+export function fetchUsage(): Promise<Usage> {
+  return callFunction<Usage>("usage", {});
 }
 
 export async function listConversations(): Promise<Conversation[]> {

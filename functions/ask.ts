@@ -43,6 +43,31 @@ function fail(code: string, message: string, status: number): Response {
   return json({ error: code, message, statusCode: status }, status);
 }
 
+/**
+ * Cuántas direcciones agrega la infraestructura de InsForge al final de
+ * `x-forwarded-for`. Observado: un pedido desde 190.112.84.146 llega como
+ * "190.112.84.146, 10.0.3.7, 3.148.156.80".
+ *
+ * Importa contar desde la derecha y no desde la izquierda: cualquiera puede
+ * mandar su propia cabecera `X-Forwarded-For` y queda anexada adelante, así
+ * que la primera entrada es la que el visitante quiera. Las del final las
+ * escribe la infraestructura y no se pueden falsificar.
+ */
+const PROXY_HOPS = 2;
+
+/** La IP del visitante, o null si la cadena no tiene la forma esperada. */
+function clientIp(req: Request): string | null {
+  const chain = (req.headers.get("x-forwarded-for") ?? "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  // Si la topología cambiara y la cadena se acortara, es preferible quedarse
+  // sin IP que tomar una entrada que el visitante controla.
+  if (chain.length < PROXY_HOPS + 1) return null;
+  return chain[chain.length - PROXY_HOPS - 1];
+}
+
 interface AuthedUser {
   id: string;
   // Cliente con el token del usuario: la búsqueda va por acá para que RLS
@@ -129,7 +154,7 @@ export default async function handler(req: Request): Promise<Response> {
   // operación, así dos pedidos a la vez no pasan ambos con el último crédito.
   const { data: consumed, error: quotaError } = await admin.database.rpc(
     "consume_question",
-    { p_owner: user.id },
+    { p_owner: user.id, p_ip: clientIp(req) },
   );
 
   if (quotaError) {
@@ -232,10 +257,7 @@ export default async function handler(req: Request): Promise<Response> {
   } catch (err) {
     // La pregunta nunca se respondió: no se la cobres al usuario.
     if (quota.log_id) {
-      await admin.database.rpc("refund_question", {
-        p_owner: user.id,
-        p_log_id: quota.log_id,
-      });
+      await admin.database.rpc("refund_question", { p_log_id: quota.log_id });
     }
     return fail("ask_failed", err instanceof Error ? err.message : String(err), 500);
   }
